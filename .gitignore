@@ -1,0 +1,34 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Temporary audio/video files
+temp/
+*.wav
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Ruff
+.ruff_cache/
+
+# Python distribution
+*.egg-info/
+dist/
+build/
