@@ -21,17 +21,13 @@ def mock_config():
     """Create mock configuration."""
     return AppConfig(
         telegram_bot_token="test_token",
-        whisper={
-            "api_base_url": "http://test.com",
-            "api_key": "test_key",
-            "model": "whisper-1"
-        },
+        whisper={"api_base_url": "http://test.com", "api_key": "test_key", "model": "whisper-1"},
         files={
             "max_file_size_mb": 25,
             "temp_dir_path": "temp",
             "allowed_audio_extensions": [".mp3", ".wav", ".m4a"],
-            "allowed_video_extensions": [".mp4", ".webm"]
-        }
+            "allowed_video_extensions": [".mp4", ".webm"],
+        },
     )
 
 
@@ -56,8 +52,10 @@ async def test_whisper_client_transcribe(mock_config):
     client = WhisperClient(mock_config.whisper)
 
     # Mock httpx response and file operations
-    with patch("httpx.AsyncClient.post") as mock_post, \
-         patch("builtins.open", create=True) as mock_open:
+    with (
+        patch("httpx.AsyncClient.post") as mock_post,
+        patch("builtins.open", create=True) as mock_open,
+    ):
         mock_response = MagicMock()
         mock_response.json.return_value = {"text": "test transcription"}
         mock_response.raise_for_status.return_value = None

@@ -1,6 +1,7 @@
 """Utility functions for Whispbot."""
 
 import logging
+import os
 import shutil
 import subprocess
 from datetime import datetime
@@ -11,10 +12,27 @@ logger = logging.getLogger(__name__)
 FALLBACK_TEMP_DIR = Path("temp")
 
 
+def get_system_temp_dir() -> Path | None:
+    """Get system temporary directory path.
+
+    Checks TEMP, TMP, and Unix /tmp in order.
+
+    Returns:
+        Optional[Path]: System temp directory or None
+    """
+    for var in ("TEMP", "TMP", "TMPDIR"):
+        val = os.environ.get(var)
+        if val:
+            return Path(val) / "whispbot"
+    if Path("/tmp").exists():
+        return Path("/tmp") / "whispbot"
+    return None
+
+
 def ensure_temp_dir(path: Path) -> Path:
     """Ensure temp directory exists and is writable.
 
-    Falls back to FALLBACK_TEMP_DIR if path is not usable.
+    Tries the given path first, then system TEMP/TMP, then FALLBACK_TEMP_DIR.
 
     Args:
         path: Desired temp directory path
@@ -22,16 +40,31 @@ def ensure_temp_dir(path: Path) -> Path:
     Returns:
         Path: Usable temp directory path
     """
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        test_file = path / ".write_test"
-        test_file.write_text("")
-        test_file.unlink()
-        return path
-    except Exception as e:
-        logger.warning("Temp dir '%s' not usable (%s), falling back to '%s'", path, e, FALLBACK_TEMP_DIR)
-        FALLBACK_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        return FALLBACK_TEMP_DIR
+    candidates = [path]
+
+    sys_temp = get_system_temp_dir()
+    if sys_temp:
+        candidates.append(sys_temp)
+
+    if FALLBACK_TEMP_DIR not in candidates:
+        candidates.append(FALLBACK_TEMP_DIR)
+
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.write_text("")
+            test_file.unlink()
+            return candidate
+        except Exception as e:
+            if candidate is candidates[-1]:
+                logger.warning(
+                    "Temp dir '%s' not usable (%s), falling back to '%s'", path, e, candidate
+                )
+            else:
+                logger.debug("Temp dir '%s' not usable (%s)", candidate, e)
+
+    return FALLBACK_TEMP_DIR
 
 
 def cleanup_temp_dir(path: Path) -> None:
@@ -81,6 +114,7 @@ def convert_audio_to_wav(input_path: Path, output_path: Path) -> bool:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         logger.info(f"Successfully converted {input_path} to {output_path}")
         return True
@@ -119,6 +153,7 @@ def extract_audio_from_video(video_path: Path, audio_path: Path) -> bool:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         logger.info(f"Successfully extracted audio from {video_path} to {audio_path}")
         return True
