@@ -31,8 +31,8 @@ uv sync
 | `WHISPER_PROMPT` | Опциональный системный промпт | `""` |
 | `FILES_MAX_FILE_SIZE_MB` | Максимальный размер файла (MB) | `25` |
 | `FILES_TEMP_DIR_PATH` | Путь к временной папке | `"temp"` |
-| `FILES_ALLOWED_AUDIO_EXTENSIONS` | Разрешённые аудиоформаты | `".mp3,.wav,.m4a"` |
-| `FILES_ALLOWED_VIDEO_EXTENSIONS` | Разрешённые видеоформаты | `".mp4,.webm"` |
+| `FILES_ALLOWED_AUDIO_EXTENSIONS` | Разрешённые аудиоформаты | `".mp3,.wav,.m4a,.flac,.aac,.opus,.ogg,.wma,.aiff"` |
+| `FILES_ALLOWED_VIDEO_EXTENSIONS` | Разрешённые видеоформаты | `".mp4,.webm,.mkv,.mov,.avi,.flv,.m4v,.3gp,.ts"` |
 | `FILES_KEEP_TEMP_FILES` | Не удалять файлы после обработки | `"false"` |
 | `LOG_LEVEL` | Уровень логирования (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `"INFO"` |
 
