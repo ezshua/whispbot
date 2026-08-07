@@ -115,11 +115,15 @@ def convert_audio_to_wav(input_path: Path, output_path: Path) -> bool:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=300,
         )
         logger.info(f"Successfully converted {input_path} to {output_path}")
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to convert {input_path}: {e.stderr}")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error(f"ffmpeg timed out converting {input_path}")
         return False
     except FileNotFoundError:
         logger.error("ffmpeg not found. Please install ffmpeg.")
@@ -154,11 +158,15 @@ def extract_audio_from_video(video_path: Path, audio_path: Path) -> bool:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=300,
         )
         logger.info(f"Successfully extracted audio from {video_path} to {audio_path}")
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to extract audio from {video_path}: {e.stderr}")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error(f"ffmpeg timed out extracting audio from {video_path}")
         return False
     except FileNotFoundError:
         logger.error("ffmpeg not found. Please install ffmpeg.")

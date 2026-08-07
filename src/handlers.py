@@ -139,6 +139,7 @@ class BotHandlers:
 
         video_file = await message.video.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".mp4")
+        audio_path: Path | None = None
 
         try:
             await video_file.download_to_drive(custom_path=str(file_path))
@@ -184,6 +185,7 @@ class BotHandlers:
 
         voice_file = await message.voice.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".ogg")
+        wav_path: Path | None = None
 
         try:
             await voice_file.download_to_drive(custom_path=str(file_path))
@@ -233,6 +235,7 @@ class BotHandlers:
 
         video_file = await message.video_note.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".mp4")
+        audio_path: Path | None = None
 
         try:
             await video_file.download_to_drive(custom_path=str(file_path))

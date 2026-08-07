@@ -43,12 +43,22 @@ class AppConfig(BaseSettings):
     files_max_file_size_mb: int = Field(25, description="Maximum file size in MB")
     files_temp_dir_path: str = Field("temp", description="Path to temporary files directory")
     files_allowed_audio_extensions: str = Field(
-        ".mp3,.wav,.m4a", description="Allowed audio file extensions (comma-separated)"
+        ".mp3,.wav,.m4a,.flac,.aac,.opus,.ogg,.wma,.aiff",
+        description="Allowed audio file extensions (comma-separated)",
     )
     files_allowed_video_extensions: str = Field(
-        ".mp4,.webm", description="Allowed video file extensions (comma-separated)"
+        ".mp4,.webm,.mkv,.mov,.avi,.flv,.m4v,.3gp,.ts",
+        description="Allowed video file extensions (comma-separated)",
     )
     files_keep_temp_files: bool = Field(False, description="Keep temp files after transcription")
+    access_allowed_users_file: str = Field(
+        "allowed_users.txt",
+        description="Path to allowed users list file (first line = admin)",
+    )
+    access_ignored_users_file: str = Field(
+        "ignored_users.txt",
+        description="Path to ignored users list file",
+    )
     log_level: str = Field("INFO", description="Logging level for the app (DEBUG, INFO, WARNING, ERROR)")
 
     model_config = SettingsConfigDict(

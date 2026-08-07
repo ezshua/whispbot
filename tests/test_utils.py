@@ -147,6 +147,11 @@ class TestConvertAudioToWav:
         result = convert_audio_to_wav(Path("in.mp3"), Path("out.wav"))
         assert result is False
 
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 300))
+    def test_timeout_returns_false(self, mock_run):
+        result = convert_audio_to_wav(Path("in.mp3"), Path("out.wav"))
+        assert result is False
+
 
 class TestExtractAudioFromVideo:
     """Tests for extract_audio_from_video."""
@@ -167,6 +172,11 @@ class TestExtractAudioFromVideo:
 
     @patch("subprocess.run", side_effect=FileNotFoundError)
     def test_ffmpeg_not_found_returns_false(self, mock_run):
+        result = extract_audio_from_video(Path("in.mp4"), Path("out.wav"))
+        assert result is False
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 300))
+    def test_timeout_returns_false(self, mock_run):
         result = extract_audio_from_video(Path("in.mp4"), Path("out.wav"))
         assert result is False
 

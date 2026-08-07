@@ -9,6 +9,17 @@ import pytest
 from src.whisper_client import WhisperClient
 
 
+def _make_mock_http_client(response_text: str = "text") -> MagicMock:
+    """Create a mock httpx.AsyncClient with a successful post response."""
+    mock_client = MagicMock()
+    mock_client.is_closed = False
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"text": response_text}
+    mock_response.raise_for_status.return_value = None
+    mock_client.post = AsyncMock(return_value=mock_response)
+    return mock_client
+
+
 class TestWhisperClientInit:
     """Tests for WhisperClient.__init__."""
 
@@ -19,6 +30,7 @@ class TestWhisperClientInit:
         assert client._model == "whisper-1"
         assert client._temperature == 0.0
         assert client._language is None
+        assert client._client is None
 
 
 class TestWhisperClientModel:
@@ -87,63 +99,53 @@ class TestWhisperClientTranscribe:
     @pytest.mark.asyncio
     async def test_success(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with (
-            patch("httpx.AsyncClient.post") as mock_post,
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_response = MagicMock()
-            mock_response.json.return_value = {"text": "transcribed text"}
-            mock_response.raise_for_status.return_value = None
-            mock_post.return_value = mock_response
+        client._client = _make_mock_http_client("transcribed text")
 
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
-
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             result = await client.transcribe(Path("test.mp3"))
             assert result == "transcribed text"
 
     @pytest.mark.asyncio
     async def test_http_error_returns_none(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with (
-            patch("httpx.AsyncClient.post") as mock_post,
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_response = MagicMock()
-            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-                "error", request=MagicMock(), response=MagicMock()
-            )
-            mock_post.return_value = mock_response
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "error", request=MagicMock(), response=MagicMock()
+        )
+        mock_http.post = AsyncMock(return_value=mock_response)
+        client._client = mock_http
 
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
-
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             result = await client.transcribe(Path("test.mp3"))
             assert result is None
 
     @pytest.mark.asyncio
     async def test_connection_error_returns_none(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with (
-            patch("httpx.AsyncClient.post", side_effect=httpx.ConnectError("connection failed")),
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_http.post = AsyncMock(side_effect=httpx.ConnectError("connection failed"))
+        client._client = mock_http
 
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             result = await client.transcribe(Path("test.mp3"))
             assert result is None
 
     @pytest.mark.asyncio
     async def test_generic_exception_returns_none(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with (
-            patch("httpx.AsyncClient.post", side_effect=RuntimeError("unexpected")),
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_http.post = AsyncMock(side_effect=RuntimeError("unexpected"))
+        client._client = mock_http
 
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             result = await client.transcribe(Path("test.mp3"))
             assert result is None
 
@@ -151,39 +153,25 @@ class TestWhisperClientTranscribe:
     async def test_sends_language_in_request_data(self, mock_config):
         client = WhisperClient(mock_config.whisper)
         client.set_language("ru")
-        with (
-            patch("httpx.AsyncClient.post") as mock_post,
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_response = MagicMock()
-            mock_response.json.return_value = {"text": "text"}
-            mock_response.raise_for_status.return_value = None
-            mock_post.return_value = mock_response
+        mock_http = _make_mock_http_client()
+        client._client = mock_http
 
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
-
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             await client.transcribe(Path("test.mp3"))
-            call_data = mock_post.call_args[1]["data"]
+            call_data = mock_http.post.call_args[1]["data"]
             assert call_data["language"] == "ru"
 
     @pytest.mark.asyncio
     async def test_uses_per_request_prompt_over_system_prompt(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with (
-            patch("httpx.AsyncClient.post") as mock_post,
-            patch("builtins.open", create=True) as mock_open,
-        ):
-            mock_response = MagicMock()
-            mock_response.json.return_value = {"text": "text"}
-            mock_response.raise_for_status.return_value = None
-            mock_post.return_value = mock_response
+        mock_http = _make_mock_http_client()
+        client._client = mock_http
 
-            mock_file = MagicMock()
-            mock_open.return_value.__enter__.return_value = mock_file
-
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
             await client.transcribe(Path("test.mp3"), prompt="per-request prompt")
-            call_data = mock_post.call_args[1]["data"]
+            call_data = mock_http.post.call_args[1]["data"]
             assert call_data["prompt"] == "per-request prompt"
 
 
@@ -197,3 +185,55 @@ class TestWhisperClientTranscribeAudio:
             result = await client.transcribe_audio(Path("test.wav"), prompt="test")
             assert result == "result"
             mock_transcribe.assert_awaited_once_with(Path("test.wav"), prompt="test")
+
+
+class TestWhisperClientClient:
+    """Tests for lazy client property and close."""
+
+    def test_client_creates_httpx_client_lazily(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        assert client._client is None
+        http_client = client.client
+        assert isinstance(http_client, httpx.AsyncClient)
+        assert client._client is http_client
+
+    def test_client_reuses_existing(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        first = client.client
+        second = client.client
+        assert first is second
+
+    @pytest.mark.asyncio
+    async def test_close_closes_client(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_http.aclose = AsyncMock()
+        client._client = mock_http
+
+        await client.close()
+        mock_http.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_noop_when_no_client(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_close_noop_when_already_closed(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        mock_http = MagicMock()
+        mock_http.is_closed = True
+        client._client = mock_http
+
+        await client.close()
+
+    def test_client_recreates_after_close(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        mock_http = MagicMock()
+        mock_http.is_closed = True
+        client._client = mock_http
+
+        new_client = client.client
+        assert new_client is not mock_http
+        assert isinstance(new_client, httpx.AsyncClient)

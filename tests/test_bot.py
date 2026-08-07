@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.bot import WhispBot, check_whisper_api, resolve_temp_dir
+from src.access_control import MAX_PENDING_MESSAGES, AccessManager
+from src.bot import NonAllowedUserFilter, WhispBot, check_whisper_api, resolve_temp_dir
 from src.config import load_config
 from src.handlers import BotHandlers
 from src.utils import FALLBACK_TEMP_DIR
 from src.whisper_client import WhisperClient
-
 
 # ── Existing tests ──────────────────────────────────────────────
 
@@ -35,19 +35,16 @@ def test_load_config():
 async def test_whisper_client_transcribe(mock_config):
     """Test Whisper client transcription."""
     client = WhisperClient(mock_config.whisper)
+    mock_http = MagicMock()
+    mock_http.is_closed = False
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"text": "test transcription"}
+    mock_response.raise_for_status.return_value = None
+    mock_http.post = AsyncMock(return_value=mock_response)
+    client._client = mock_http
 
-    with (
-        patch("httpx.AsyncClient.post") as mock_post,
-        patch("builtins.open", create=True) as mock_open,
-    ):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"text": "test transcription"}
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
-
-        mock_file = MagicMock()
-        mock_open.return_value.__enter__.return_value = mock_file
-
+    with patch("builtins.open", create=True) as mock_open:
+        mock_open.return_value.__enter__.return_value = MagicMock()
         result = await client.transcribe(Path("test.mp3"))
         assert result == "test transcription"
 
@@ -385,3 +382,180 @@ class TestResolveTempDir:
         assert result == Path("temp")
         mock_ensure.assert_called_once_with(Path("temp"))
         mock_cleanup.assert_called_once_with(Path("temp"))
+
+
+# ── Gatekeeper ──────────────────────────────────────────────────
+
+
+def _make_access(tmp_path, allowed="1; Admin\n", ignored=""):
+    """Create an AccessManager with a real admin from test files."""
+    allowed_path = tmp_path / "allowed.txt"
+    allowed_path.write_text(allowed, encoding="utf-8")
+    ignored_path = tmp_path / "ignored.txt"
+    ignored_path.write_text(ignored, encoding="utf-8")
+    return AccessManager(allowed_path, ignored_path)
+
+
+def _make_update(user_id, text=None, voice=None):
+    message = MagicMock()
+    message.text = text
+    message.voice = voice
+    message.forward = AsyncMock()
+    message.reply_text = AsyncMock()
+    user = MagicMock()
+    user.id = user_id
+    user.full_name = "Test User"
+    update = MagicMock()
+    update.effective_user = user
+    update.message = message
+    context = MagicMock()
+    context.bot.send_message = AsyncMock()
+    return update, context
+
+
+class TestNonAllowedUserFilter:
+    """Tests for NonAllowedUserFilter."""
+
+    def test_matches_non_allowed_user(self, tmp_path):
+        access = _make_access(tmp_path)
+        update, _ = _make_update(999)
+        assert NonAllowedUserFilter(access).check_update(update) is True
+
+    def test_does_not_match_allowed_user(self, tmp_path):
+        access = _make_access(tmp_path)
+        update, _ = _make_update(1)
+        assert NonAllowedUserFilter(access).check_update(update) is False
+
+    def test_matches_ignored_user(self, tmp_path):
+        access = _make_access(tmp_path, allowed="1\n", ignored="999; Blocked\n")
+        update, _ = _make_update(999)
+        assert NonAllowedUserFilter(access).check_update(update) is True
+
+    def test_returns_false_without_user(self, tmp_path):
+        access = _make_access(tmp_path)
+        update = MagicMock()
+        update.effective_user = None
+        assert NonAllowedUserFilter(access).check_update(update) is False
+
+    def test_allows_admin_voice_message(self, tmp_path):
+        """Admin's voice message must not be swallowed by the gatekeeper."""
+        access = _make_access(tmp_path)
+        update, _ = _make_update(1, voice=MagicMock())
+        assert NonAllowedUserFilter(access).check_update(update) is False
+
+    def test_allows_admin_audio_message(self, tmp_path):
+        access = _make_access(tmp_path)
+        update, _ = _make_update(1, voice=None)
+        update.message.audio = MagicMock()
+        assert NonAllowedUserFilter(access).check_update(update) is False
+
+
+class TestGatekeeper:
+    """Tests for the gatekeeper handler."""
+
+    @pytest.mark.asyncio
+    async def test_silently_ignores_ignored_users(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="1\n", ignored="777; Blocked\n")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(777, text="hello")
+
+        await bot._gatekeeper(update, context)
+
+        update.message.reply_text.assert_not_called()
+        update.message.forward.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_forwards_text_to_admin_and_replies(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, text="user question")
+
+        await bot._gatekeeper(update, context)
+
+        update.message.forward.assert_awaited_once_with(chat_id=1)
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "передан администратору" in text
+        remaining = MAX_PENDING_MESSAGES - 1
+        assert str(remaining) in text
+
+    @pytest.mark.asyncio
+    async def test_notifies_admin_with_user_info_before_forward(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, text="user question")
+
+        await bot._gatekeeper(update, context)
+
+        context.bot.send_message.assert_awaited()
+        notice = context.bot.send_message.call_args.kwargs
+        assert notice["chat_id"] == 1
+        assert "Test User" in notice["text"]
+        assert "999" in notice["text"]
+        assert "подключиться" in notice["text"]
+        update.message.forward.assert_awaited_once_with(chat_id=1)
+
+    @pytest.mark.asyncio
+    async def test_forwards_voice_to_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, voice=MagicMock())
+
+        await bot._gatekeeper(update, context)
+
+        update.message.forward.assert_awaited_once_with(chat_id=1)
+        update.message.reply_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_warns_wrong_type_without_forwarding(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, text=None, voice=None)
+        update.message.audio = MagicMock()
+
+        await bot._gatekeeper(update, context)
+
+        update.message.forward.assert_not_called()
+        update.message.reply_text.assert_awaited_once()
+        assert "только текстовые и голосовые" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_adds_to_ignored_after_max_messages(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+
+        for _ in range(MAX_PENDING_MESSAGES):
+            update, context = _make_update(555, text="request")
+            await bot._gatekeeper(update, context)
+
+        assert access.is_ignored(555)
+        last_reply = update.message.reply_text.call_args[0][0]
+        assert "игнорируемых" in last_reply
+        ignored_notice = [
+            call.kwargs["text"]
+            for call in context.bot.send_message.call_args_list
+            if "игнорируемых" in call.kwargs["text"]
+        ]
+        assert len(ignored_notice) == 1
+
+    @pytest.mark.asyncio
+    async def test_replies_when_no_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, text="question")
+
+        await bot._gatekeeper(update, context)
+
+        update.message.forward.assert_not_called()
+        update.message.reply_text.assert_awaited_once()
+        assert "не может быть отправлен" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_gatekeeper_skips_without_access_manager(self, mock_config):
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
+        update, context = _make_update(999, text="question")
+
+        await bot._gatekeeper(update, context)
+
+        update.message.reply_text.assert_not_called()
+        update.message.forward.assert_not_called()

@@ -37,6 +37,7 @@ class WhisperClient:
         self._model = config.model
         self._temperature = TEMPERATURE
         self._language = LANGUAGE
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def model(self) -> str:
@@ -77,6 +78,18 @@ class WhisperClient:
         """
         self._language = code
 
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Lazy-initialized HTTP client, reused across requests."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if open."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
     async def transcribe(self, file_path: Path, prompt: str | None = None) -> str | None:
         """Transcribe audio file using Whisper API.
 
@@ -110,21 +123,20 @@ class WhisperClient:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                with open(file_path, "rb") as audio_file:
-                    files = {"file": (file_path.name, audio_file, "application/octet-stream")}
-                    headers = {"Authorization": f"Bearer {self.api_key}"}
+            with open(file_path, "rb") as audio_file:
+                files = {"file": (file_path.name, audio_file, "application/octet-stream")}
+                headers = {"Authorization": f"Bearer {self.api_key}"}
 
-                    response = await client.post(url, files=files, data=data, headers=headers)
+                response = await self.client.post(url, files=files, data=data, headers=headers)
 
-                    logger.debug(
-                        "Whisper response: status=%s body=%s", response.status_code, response.text
-                    )
+                logger.debug(
+                    "Whisper response: status=%s body=%s", response.status_code, response.text
+                )
 
-                    response.raise_for_status()
+                response.raise_for_status()
 
-                    result = response.json()
-                    return result.get("text")
+                result = response.json()
+                return result.get("text")
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Whisper API request failed: {e}")

@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -10,6 +11,7 @@ from telegram.ext import (
     filters,
 )
 
+from .access_control import MAX_PENDING_MESSAGES, AccessManager
 from .config import load_config
 from .handlers import BotHandlers
 from .utils import cleanup_temp_dir, ensure_temp_dir
@@ -17,18 +19,51 @@ from .whisper_client import WhisperClient
 
 logger = logging.getLogger("src.bot")
 
+ACCESS_DENIED_TEXT = (
+    "⚠️ Доступ ограничен: вас нет в списке разрешённых пользователей.\n"
+    "Отправлять можно только текстовые и голосовые сообщения — "
+    "они будут переданы администратору бота.\n"
+    "Осталось сообщений администратору: {remaining}."
+)
+
+
+class NonAllowedUserFilter(filters.UpdateFilter):
+    """Match messages from users not present in the allowed list.
+
+    Subclasses UpdateFilter (not BaseFilter): BaseFilter.check_update only
+    checks the update type and never calls filter(), which would make the
+    gatekeeper consume every message including those from allowed users.
+    """
+
+    def __init__(self, access: AccessManager) -> None:
+        """Initialize the filter.
+
+        Args:
+            access: User access manager
+        """
+        super().__init__()
+        self.access = access
+
+    def filter(self, update: Update) -> bool:
+        user = update.effective_user
+        if user is None:
+            return False
+        return not self.access.is_allowed(user.id)
+
 
 class WhispBot:
     """Main Telegram bot class."""
 
-    def __init__(self, config, temp_dir: Path):
+    def __init__(self, config, temp_dir: Path, access: AccessManager | None = None):
         """Initialize the bot.
 
         Args:
             config: Application configuration
             temp_dir: Temporary files directory
+            access: Optional user access manager (enables the gatekeeper)
         """
         self.config = config
+        self.access = access
         self.whisper_client = WhisperClient(self.config.whisper)
         self.handlers = BotHandlers(self.config, self.whisper_client, temp_dir)
 
@@ -36,6 +71,10 @@ class WhispBot:
         """Run the bot."""
         application = Application.builder().token(self.config.telegram_bot_token).build()
 
+        if self.access is not None:
+            application.add_handler(
+                MessageHandler(NonAllowedUserFilter(self.access), self._gatekeeper)
+            )
         application.add_handler(CommandHandler("start", self._start_command))
         application.add_handler(CommandHandler("startmin", self._startmin_command))
         application.add_handler(CommandHandler("help", self._help_command))
@@ -47,9 +86,73 @@ class WhispBot:
         application.add_handler(MessageHandler(filters.VOICE, self.handlers.handle_voice))
         application.add_handler(MessageHandler(filters.VIDEO_NOTE, self.handlers.handle_video_note))
         application.add_handler(MessageHandler(filters.Document.ALL, self.handlers.handle_document))
+        application.add_error_handler(self._error_handler)
+        application.post_shutdown = self._on_shutdown
 
         logger.info("WhispBot started — awaiting messages")
         application.run_polling(allowed_updates=["message"])
+
+    async def _on_shutdown(self, application) -> None:
+        """Clean up resources on shutdown."""
+        await self.whisper_client.close()
+
+    async def _error_handler(self, update, context) -> None:
+        """Log unhandled exceptions from handlers."""
+        logger.error("Unhandled exception: %s", context.error, exc_info=context.error)
+
+    async def _gatekeeper(self, update: Update, context) -> None:
+        """Handle messages from users who are not in the allowed list.
+
+        Forwards text and voice messages to the admin and counts pending
+        requests. Users are silently ignored if they are in the ignored list.
+        After MAX_PENDING_MESSAGES requests the user is added to the ignored
+        list and the admin is notified.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        user = update.effective_user
+        message = update.message
+        if user is None or message is None or self.access is None:
+            return
+        if self.access.is_allowed(user.id) or self.access.is_ignored(user.id):
+            return
+
+        if message.text is None and message.voice is None:
+            await message.reply_text(
+                ACCESS_DENIED_TEXT.format(
+                    remaining=MAX_PENDING_MESSAGES - self.access.pending_count(user.id)
+                )
+            )
+            return
+
+        if self.access.admin_id is None:
+            await message.reply_text("К сожалению, запрос не может быть отправлен администратору бота.")
+            return
+
+        await context.bot.send_message(
+            chat_id=self.access.admin_id,
+            text=f"👤 Пользователь {user.full_name} (id {user.id}) хочет подключиться к боту:",
+        )
+        await message.forward(chat_id=self.access.admin_id)
+        count = self.access.record_pending(user.id, user.full_name or "unknown")
+
+        if count >= MAX_PENDING_MESSAGES:
+            await message.reply_text(
+                f"Ваш запрос передан администратору, но это было последнее "
+                f"({MAX_PENDING_MESSAGES}) сообщение — вы добавлены в список игнорируемых."
+            )
+            await context.bot.send_message(
+                chat_id=self.access.admin_id,
+                text=f"Пользователь {user.full_name} (id {user.id}) добавлен в список игнорируемых.",
+            )
+        else:
+            await message.reply_text(
+                f"✅ Запрос передан администратору. "
+                f"Осталось сообщений администратору: {MAX_PENDING_MESSAGES - count}."
+            )
+        logger.info("Pending request forwarded from user %s", user.id)
 
     async def _start_command(self, update, context) -> None:
         """Handle /start command — normal mode (two-phase)."""
@@ -223,7 +326,11 @@ def main() -> None:
     temp_dir = resolve_temp_dir(config)
     check_whisper_api(config)
 
-    bot = WhispBot(config, temp_dir)
+    access = AccessManager(
+        Path(config.access_allowed_users_file),
+        Path(config.access_ignored_users_file),
+    )
+    bot = WhispBot(config, temp_dir, access)
     bot.run()
 
 
