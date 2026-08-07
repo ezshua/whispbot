@@ -14,8 +14,9 @@ from telegram.ext import (
 from .access_control import MAX_PENDING_MESSAGES, AccessManager, parse_user_args
 from .config import load_config
 from .handlers import BotHandlers
+from .user_settings import get_user_settings
 from .utils import cleanup_temp_dir, ensure_temp_dir
-from .whisper_client import WhisperClient
+from .whisper_client import MODEL_ALIASES, WhisperClient
 
 logger = logging.getLogger("src.bot")
 
@@ -247,23 +248,44 @@ class WhispBot:
         logger.info("listuser: lists sent to admin %s", user.id)
 
     async def _start_command(self, update, context) -> None:
-        """Handle /start command — normal mode (two-phase)."""
-        self.handlers.minimal_mode = False
-        wc = self.whisper_client
-        lang = wc.language or "auto"
+        """Handle /start command — normal mode (two-phase).
+
+        Switches the user to the two-phase response mode and shows their
+        current individual settings, so they can recall them at any time.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        settings = get_user_settings(context)
+        settings.minimal_mode = False
+
+        model = settings.model or self.whisper_client.model
+        lang = settings.language or "auto"
         await update.message.reply_text(
             "🎤 Привет! Я WhispBot — бот для транскрибации аудио и видео."
             "\n\nПросто отправьте мне аудио или видео файл, "
             "и я верну текстовое содержимое."
-            f"\n\n⚙ Текущие параметры:"
-            f"\n• Модель: `{wc.model}`"
+            "\n\n⚙ Ваши текущие параметры:"
+            f"\n• Модель: `{model}`"
             f"\n• Язык: `{lang}`"
-            f"\n• Температура: `{wc.temperature}`"
+            f"\n• Температура: `{settings.temperature}`"
+            "\n\nНастройки можно менять командами `/lang`, `/temp`, `/model`, "
+            "`/startmin`. Индивидуальные настройки хранятся в памяти бота."
         )
 
     async def _startmin_command(self, update, context) -> None:
-        """Handle /startmin command — minimal mode (single response)."""
-        self.handlers.minimal_mode = True
+        """Handle /startmin command — minimal mode (single response).
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        get_user_settings(context).minimal_mode = True
+        await update.message.reply_text(
+            "⚡ Минимальный режим: результат придёт одним сообщением.\n"
+            "Команда `/start` вернёт обычный режим и покажет ваши настройки."
+        )
 
     async def _help_command(self, update, context) -> None:
         """Handle /help command."""
@@ -277,6 +299,7 @@ class WhispBot:
             f"\nВидео: {', '.join(self.config.files.allowed_video_extensions)}"
             "\n\n**Команды:**"
             "\n`/start` — обычный режим (двухфазный: «Слушаю...» → текст)"
+            " и показ ваших текущих настроек"
             "\n`/startmin` — минимальный режим (одно сообщение с результатом)"
             "\n`/help` — эта справка"
             "\n`/lang <код>` — установить язык (ISO-639-1, например `ru`, `en`)"
@@ -284,6 +307,8 @@ class WhispBot:
             "\n`/temp <0.0–1.0>` — установить температуру модели"
             "\n`/model large` — переключиться на whisper-large-v3"
             "\n`/model turbo` — переключиться на whisper-large-v3-turbo"
+            "\n\nНастройки индивидуальны для каждого пользователя "
+            "и действуют до перезапуска бота."
             "\n`/adduser <id> [имя]` — добавить пользователя в список разрешённых "
             "(только для администратора)"
             "\n`/deluser <id>` — переместить пользователя в список игнорируемых "
@@ -293,7 +318,7 @@ class WhispBot:
         )
 
     async def _lang_command(self, update, context) -> None:
-        """Handle /lang command — set recognition language."""
+        """Handle /lang command — set the user's recognition language."""
         args = context.args
         if not args:
             await update.message.reply_text(
@@ -302,12 +327,13 @@ class WhispBot:
             )
             return
 
+        settings = get_user_settings(context)
         code = args[0].lower()
         if code == "auto":
-            self.whisper_client.set_language(None)
+            settings.language = None
             await update.message.reply_text("Язык: автораспознавание")
         else:
-            self.whisper_client.set_language(code)
+            settings.language = code
             await update.message.reply_text(f"Язык: `{code}`")
 
         logger.info("Language set to %s by user %s", code, update.effective_user.id)
@@ -316,9 +342,7 @@ class WhispBot:
         """Handle /temp command — set sampling temperature."""
         args = context.args
         if not args:
-            await update.message.reply_text(
-                "Использование: `/temp <0.0–1.0>`\nПример: `/temp 0.5`"
-            )
+            await update.message.reply_text("Использование: `/temp <0.0–1.0>`\nПример: `/temp 0.5`")
             return
 
         raw = args[0].replace(",", ".")
@@ -332,7 +356,7 @@ class WhispBot:
             await update.message.reply_text("Ошибка: температура должна быть от 0 до 1")
             return
 
-        self.whisper_client.set_temperature(value)
+        get_user_settings(context).temperature = value
         await update.message.reply_text(f"Температура: `{value}`")
         logger.info("Temperature set to %s by user %s", value, update.effective_user.id)
 
@@ -340,9 +364,7 @@ class WhispBot:
         """Handle /model command — switch model at runtime."""
         args = context.args
         if not args:
-            await update.message.reply_text(
-                "Использование: `/model large` или `/model turbo`"
-            )
+            await update.message.reply_text("Использование: `/model large` или `/model turbo`")
             return
 
         alias = args[0].lower()
@@ -353,9 +375,11 @@ class WhispBot:
             )
             return
 
-        self.whisper_client.set_model(alias)
-        await update.message.reply_text(f"Модель: `{self.whisper_client.model}`")
-        logger.info("Model switched to %s by user %s", self.whisper_client.model, update.effective_user.id)
+        get_user_settings(context).model = MODEL_ALIASES.get(alias, alias)
+        await update.message.reply_text(f"Модель: `{MODEL_ALIASES[alias]}`")
+        logger.info(
+            "Model switched to %s by user %s", MODEL_ALIASES[alias], update.effective_user.id
+        )
 
 
 def check_whisper_api(config) -> None:

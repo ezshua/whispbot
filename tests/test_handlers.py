@@ -1,11 +1,11 @@
 """Tests for bot message handlers."""
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.handlers import BotHandlers
+from src.user_settings import UserSettings
 from src.utils import FALLBACK_TEMP_DIR
 from src.whisper_client import WhisperClient
 
@@ -39,8 +39,10 @@ def mock_update(mock_audio_message):
 
 @pytest.fixture
 def mock_context():
-    """Create a mock Telegram context."""
-    return MagicMock()
+    """Create a mock Telegram context with a real user_data dict."""
+    mock = MagicMock()
+    mock.user_data = {}
+    return mock
 
 
 class TestCheckFileSize:
@@ -72,20 +74,18 @@ class TestRespond:
 
     @pytest.mark.asyncio
     async def test_minimal_mode_replies_to_message(self, handlers, mock_update, mock_context):
-        handlers.minimal_mode = True
         mock_update.message.reply_text = AsyncMock()
 
-        await handlers._respond(mock_update, None, "result")
+        await handlers._respond(mock_update, None, "result", minimal_mode=True)
 
         mock_update.message.reply_text.assert_called_once_with("result")
 
     @pytest.mark.asyncio
     async def test_normal_mode_edits_listening_message(self, handlers, mock_update, mock_context):
-        handlers.minimal_mode = False
         mock_listening = MagicMock()
         mock_listening.edit_text = AsyncMock()
 
-        await handlers._respond(mock_update, mock_listening, "result")
+        await handlers._respond(mock_update, mock_listening, "result", minimal_mode=False)
 
         mock_listening.edit_text.assert_called_once_with("result")
 
@@ -330,3 +330,57 @@ class TestHandlerEdgeCases:
 
         mock_listening.edit_text.assert_called_once()
         assert "не удалось транскрибировать" in mock_listening.edit_text.call_args[0][0]
+
+
+class TestHandlerPerUserSettings:
+    """Tests for per-user settings in handlers."""
+
+    def _make_mock_update(self, minimal=False):
+        mock_message = MagicMock()
+        mock_message.from_user.id = 123
+        mock_message.audio = MagicMock()
+        mock_message.audio.file_id = "audio_id"
+        mock_message.audio.file_size = 1024
+        mock_message.caption = None
+        mock_file = MagicMock()
+        mock_file.download_to_drive = AsyncMock()
+        mock_message.audio.get_file = AsyncMock(return_value=mock_file)
+        mock_listening = MagicMock()
+        mock_listening.edit_text = AsyncMock()
+        mock_message.reply_text = AsyncMock(return_value=mock_listening)
+        update = MagicMock()
+        update.message = mock_message
+        return update
+
+    @pytest.mark.asyncio
+    async def test_minimal_mode_replies_directly_without_listening(self, handlers, mock_config):
+        update = self._make_mock_update()
+        context = MagicMock()
+        context.user_data = {"settings": UserSettings(minimal_mode=True)}
+        handlers.whisper_client.transcribe_audio = AsyncMock(return_value="result")
+
+        with patch("src.handlers.convert_audio_to_wav", return_value=True):
+            await handlers.handle_audio(update, context)
+
+        replies = [call.args[0] for call in update.message.reply_text.call_args_list]
+        assert replies == ["result"]
+        update.message.reply_text.assert_awaited_once_with("result")
+
+    @pytest.mark.asyncio
+    async def test_passes_user_settings_to_transcribe(self, handlers, mock_config):
+        update = self._make_mock_update()
+        context = MagicMock()
+        context.user_data = {
+            "settings": UserSettings(language="en", temperature=0.3, model="whisper-large-v3-turbo")
+        }
+        mock_transcribe = AsyncMock(return_value="transcribed")
+        handlers.whisper_client.transcribe_audio = mock_transcribe
+        handlers.keep_temp_files = True
+
+        with patch("src.handlers.convert_audio_to_wav", return_value=True):
+            await handlers.handle_audio(update, context)
+
+        call_kwargs = mock_transcribe.call_args.kwargs
+        assert call_kwargs["language"] == "en"
+        assert call_kwargs["temperature"] == 0.3
+        assert call_kwargs["model"] == "whisper-large-v3-turbo"

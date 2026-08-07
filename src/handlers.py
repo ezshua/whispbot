@@ -7,6 +7,7 @@ from telegram import Message, Update
 from telegram.ext import ContextTypes
 
 from .config import AppConfig
+from .user_settings import get_user_settings
 from .utils import (
     convert_audio_to_wav,
     extract_audio_from_video,
@@ -34,17 +35,19 @@ class BotHandlers:
         self.temp_dir = temp_dir
         self.max_file_size = config.files.max_file_size_mb * 1024 * 1024
         self.keep_temp_files = config.files.keep_temp_files
-        self.minimal_mode = False
 
-    async def _respond(self, update: Update, listening_message, text: str) -> None:
-        """Reply or edit depending on minimal_mode.
+    async def _respond(
+        self, update: Update, listening_message, text: str, minimal_mode: bool
+    ) -> None:
+        """Reply or edit depending on the user's selected response mode.
 
         Args:
             update: Telegram update object
             listening_message: Message to edit (None in minimal mode)
             text: Text to send
+            minimal_mode: Whether to reply with a single message instead of editing
         """
-        if self.minimal_mode:
+        if minimal_mode:
             await update.message.reply_text(text)
         else:
             await listening_message.edit_text(text)
@@ -83,9 +86,9 @@ class BotHandlers:
         if not await self._check_file_size(message.audio.file_size, update):
             return
 
-        listening_message = (
-            None if self.minimal_mode else await message.reply_text("Слушаю...")
-        )
+        settings = get_user_settings(context)
+        minimal_mode = settings.minimal_mode
+        listening_message = None if minimal_mode else await message.reply_text("Слушаю...")
 
         audio_file = await message.audio.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".mp3")
@@ -97,22 +100,40 @@ class BotHandlers:
             if file_path.suffix.lower() != ".wav":
                 wav_path = file_path.with_suffix(".wav")
                 if not convert_audio_to_wav(file_path, wav_path):
-                    await self._respond(update, listening_message, "Ошибка: не удалось конвертировать аудио")
+                    await self._respond(
+                        update,
+                        listening_message,
+                        "Ошибка: не удалось конвертировать аудио",
+                        minimal_mode,
+                    )
                     return
                 transcribe_path = wav_path
             else:
                 transcribe_path = file_path
 
-            transcription = await self.whisper_client.transcribe_audio(transcribe_path, prompt=caption)
+            transcription = await self.whisper_client.transcribe_audio(
+                transcribe_path,
+                prompt=caption,
+                model=settings.model,
+                temperature=settings.temperature,
+                language=settings.language,
+            )
 
             if transcription:
-                await self._respond(update, listening_message, transcription)
+                await self._respond(update, listening_message, transcription, minimal_mode)
             else:
-                await self._respond(update, listening_message, "Ошибка: не удалось транскрибировать аудио")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось транскрибировать аудио",
+                    minimal_mode,
+                )
 
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
-            await self._respond(update, listening_message, "Ошибка: не удалось обработать аудио")
+            await self._respond(
+                update, listening_message, "Ошибка: не удалось обработать аудио", minimal_mode
+            )
         finally:
             if not self.keep_temp_files:
                 for p in (file_path, wav_path):
@@ -133,9 +154,9 @@ class BotHandlers:
         if not await self._check_file_size(message.video.file_size, update):
             return
 
-        listening_message = (
-            None if self.minimal_mode else await message.reply_text("Слушаю...")
-        )
+        settings = get_user_settings(context)
+        minimal_mode = settings.minimal_mode
+        listening_message = None if minimal_mode else await message.reply_text("Слушаю...")
 
         video_file = await message.video.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".mp4")
@@ -146,19 +167,37 @@ class BotHandlers:
 
             audio_path = file_path.with_suffix(".wav")
             if not extract_audio_from_video(file_path, audio_path):
-                await self._respond(update, listening_message, "Ошибка: не удалось извлечь аудио из видео")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось извлечь аудио из видео",
+                    minimal_mode,
+                )
                 return
 
-            transcription = await self.whisper_client.transcribe_audio(audio_path, prompt=caption)
+            transcription = await self.whisper_client.transcribe_audio(
+                audio_path,
+                prompt=caption,
+                model=settings.model,
+                temperature=settings.temperature,
+                language=settings.language,
+            )
 
             if transcription:
-                await self._respond(update, listening_message, transcription)
+                await self._respond(update, listening_message, transcription, minimal_mode)
             else:
-                await self._respond(update, listening_message, "Ошибка: не удалось транскрибировать видео")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось транскрибировать видео",
+                    minimal_mode,
+                )
 
         except Exception as e:
             logger.error(f"Error processing video: {e}")
-            await self._respond(update, listening_message, "Ошибка: не удалось обработать видео")
+            await self._respond(
+                update, listening_message, "Ошибка: не удалось обработать видео", minimal_mode
+            )
         finally:
             if not self.keep_temp_files:
                 for p in (file_path, audio_path):
@@ -179,9 +218,9 @@ class BotHandlers:
         if not await self._check_file_size(message.voice.file_size, update):
             return
 
-        listening_message = (
-            None if self.minimal_mode else await message.reply_text("Слушаю...")
-        )
+        settings = get_user_settings(context)
+        minimal_mode = settings.minimal_mode
+        listening_message = None if minimal_mode else await message.reply_text("Слушаю...")
 
         voice_file = await message.voice.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".ogg")
@@ -193,22 +232,39 @@ class BotHandlers:
             wav_path = file_path.with_suffix(".wav")
             if not convert_audio_to_wav(file_path, wav_path):
                 await self._respond(
-                    update, listening_message, "Ошибка: не удалось конвертировать аудиосообщение"
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось конвертировать аудиосообщение",
+                    minimal_mode,
                 )
                 return
 
-            transcription = await self.whisper_client.transcribe_audio(wav_path, prompt=caption)
+            transcription = await self.whisper_client.transcribe_audio(
+                wav_path,
+                prompt=caption,
+                model=settings.model,
+                temperature=settings.temperature,
+                language=settings.language,
+            )
 
             if transcription:
-                await self._respond(update, listening_message, transcription)
+                await self._respond(update, listening_message, transcription, minimal_mode)
             else:
                 await self._respond(
-                    update, listening_message, "Ошибка: не удалось транскрибировать аудиосообщение"
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось транскрибировать аудиосообщение",
+                    minimal_mode,
                 )
 
         except Exception as e:
             logger.error(f"Error processing voice: {e}")
-            await self._respond(update, listening_message, "Ошибка: не удалось обработать аудиосообщение")
+            await self._respond(
+                update,
+                listening_message,
+                "Ошибка: не удалось обработать аудиосообщение",
+                minimal_mode,
+            )
         finally:
             if not self.keep_temp_files:
                 for p in (file_path, wav_path):
@@ -229,9 +285,9 @@ class BotHandlers:
         if not await self._check_file_size(message.video_note.file_size, update):
             return
 
-        listening_message = (
-            None if self.minimal_mode else await message.reply_text("Слушаю...")
-        )
+        settings = get_user_settings(context)
+        minimal_mode = settings.minimal_mode
+        listening_message = None if minimal_mode else await message.reply_text("Слушаю...")
 
         video_file = await message.video_note.get_file()
         file_path = self.temp_dir / temp_filename(user_id, ".mp4")
@@ -242,19 +298,40 @@ class BotHandlers:
 
             audio_path = file_path.with_suffix(".wav")
             if not extract_audio_from_video(file_path, audio_path):
-                await self._respond(update, listening_message, "Ошибка: не удалось извлечь аудио из кружочка")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось извлечь аудио из кружочка",
+                    minimal_mode,
+                )
                 return
 
-            transcription = await self.whisper_client.transcribe_audio(audio_path, prompt=caption)
+            transcription = await self.whisper_client.transcribe_audio(
+                audio_path,
+                prompt=caption,
+                model=settings.model,
+                temperature=settings.temperature,
+                language=settings.language,
+            )
 
             if transcription:
-                await self._respond(update, listening_message, transcription)
+                await self._respond(update, listening_message, transcription, minimal_mode)
             else:
-                await self._respond(update, listening_message, "Ошибка: не удалось транскрибировать кружочек")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось транскрибировать кружочек",
+                    minimal_mode,
+                )
 
         except Exception as e:
             logger.error(f"Error processing video note: {e}")
-            await self._respond(update, listening_message, "Ошибка: не удалось обработать кружочек")
+            await self._respond(
+                update,
+                listening_message,
+                "Ошибка: не удалось обработать кружочек",
+                minimal_mode,
+            )
         finally:
             if not self.keep_temp_files:
                 for p in (file_path, audio_path):
@@ -293,9 +370,9 @@ class BotHandlers:
         if not await self._check_file_size(document.file_size, update):
             return
 
-        listening_message = (
-            None if self.minimal_mode else await message.reply_text("Слушаю...")
-        )
+        settings = get_user_settings(context)
+        minimal_mode = settings.minimal_mode
+        listening_message = None if minimal_mode else await message.reply_text("Слушаю...")
 
         doc_file = await document.get_file()
         file_path = self.temp_dir / temp_filename(user_id, file_ext)
@@ -308,36 +385,61 @@ class BotHandlers:
             if file_ext.lower() in self.config.files.allowed_audio_extensions:
                 if file_path.suffix.lower() != ".wav":
                     if not convert_audio_to_wav(file_path, audio_path):
-                        await self._respond(update, listening_message, "Ошибка: не удалось конвертировать аудио")
+                        await self._respond(
+                            update,
+                            listening_message,
+                            "Ошибка: не удалось конвертировать аудио",
+                            minimal_mode,
+                        )
                         return
                     transcribe_path = audio_path
                 else:
                     transcribe_path = file_path
 
                 transcription = await self.whisper_client.transcribe_audio(
-                    transcribe_path, prompt=caption
+                    transcribe_path,
+                    prompt=caption,
+                    model=settings.model,
+                    temperature=settings.temperature,
+                    language=settings.language,
                 )
 
             elif file_ext.lower() in self.config.files.allowed_video_extensions:
                 if not extract_audio_from_video(file_path, audio_path):
-                    await self._respond(update, listening_message, "Ошибка: не удалось извлечь аудио из видео")
+                    await self._respond(
+                        update,
+                        listening_message,
+                        "Ошибка: не удалось извлечь аудио из видео",
+                        minimal_mode,
+                    )
                     return
 
                 transcription = await self.whisper_client.transcribe_audio(
-                    audio_path, prompt=caption
+                    audio_path,
+                    prompt=caption,
+                    model=settings.model,
+                    temperature=settings.temperature,
+                    language=settings.language,
                 )
 
             else:
                 transcription = None
 
             if transcription:
-                await self._respond(update, listening_message, transcription)
+                await self._respond(update, listening_message, transcription, minimal_mode)
             else:
-                await self._respond(update, listening_message, "Ошибка: не удалось транскрибировать файл")
+                await self._respond(
+                    update,
+                    listening_message,
+                    "Ошибка: не удалось транскрибировать файл",
+                    minimal_mode,
+                )
 
         except Exception as e:
             logger.error(f"Error processing document: {e}")
-            await self._respond(update, listening_message, "Ошибка: не удалось обработать файл")
+            await self._respond(
+                update, listening_message, "Ошибка: не удалось обработать файл", minimal_mode
+            )
         finally:
             if not self.keep_temp_files:
                 for p in (file_path, audio_path):

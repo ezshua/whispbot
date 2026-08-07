@@ -181,10 +181,65 @@ class TestWhisperClientTranscribeAudio:
     @pytest.mark.asyncio
     async def test_delegates_to_transcribe(self, mock_config):
         client = WhisperClient(mock_config.whisper)
-        with patch.object(client, "transcribe", AsyncMock(return_value="result")) as mock_transcribe:
+        with patch.object(
+            client, "transcribe", AsyncMock(return_value="result")
+        ) as mock_transcribe:
             result = await client.transcribe_audio(Path("test.wav"), prompt="test")
             assert result == "result"
-            mock_transcribe.assert_awaited_once_with(Path("test.wav"), prompt="test")
+            mock_transcribe.assert_awaited_once_with(
+                Path("test.wav"), prompt="test", model=None, temperature=None, language=None
+            )
+
+
+class TestTranscribeOverrides:
+    """Tests for per-request overrides in transcribe."""
+
+    @pytest.mark.asyncio
+    async def test_uses_per_request_parameters(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        mock_http = _make_mock_http_client()
+        client._client = mock_http
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
+            await client.transcribe(
+                Path("test.mp3"),
+                model="whisper-large-v3-turbo",
+                temperature=0.5,
+                language="en",
+            )
+            call_data = mock_http.post.call_args[1]["data"]
+            assert call_data["model"] == "whisper-large-v3-turbo"
+            assert call_data["temperature"] == 0.5
+            assert call_data["language"] == "en"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_client_defaults(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        assert client.model != "whisper-large-v3-turbo"
+        mock_http = _make_mock_http_client()
+        client._client = mock_http
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
+            await client.transcribe(Path("test.mp3"))
+            call_data = mock_http.post.call_args[1]["data"]
+            assert call_data["model"] == "whisper-1"
+            assert call_data["temperature"] == 0.0
+            assert "language" not in call_data
+
+    @pytest.mark.asyncio
+    async def test_override_model_resolves_back_to_default(self, mock_config):
+        client = WhisperClient(mock_config.whisper)
+        client.set_language("ru")
+        mock_http = _make_mock_http_client()
+        client._client = mock_http
+
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value = MagicMock()
+            await client.transcribe(Path("test.mp3"), language=None)
+            call_data = mock_http.post.call_args[1]["data"]
+            assert call_data["language"] == "ru"
 
 
 class TestWhisperClientClient:

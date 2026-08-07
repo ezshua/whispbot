@@ -90,26 +90,43 @@ class WhisperClient:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
 
-    async def transcribe(self, file_path: Path, prompt: str | None = None) -> str | None:
+    async def transcribe(
+        self,
+        file_path: Path,
+        prompt: str | None = None,
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        language: str | None = None,
+    ) -> str | None:
         """Transcribe audio file using Whisper API.
+
+        Per-request overrides fall back to the client defaults (``model``,
+        ``temperature``, ``language``) when not provided.
 
         Args:
             file_path: Path to audio file
             prompt: Optional per-request prompt; falls back to system prompt if not set
+            model: Per-request model name; defaults to the client model
+            temperature: Per-request sampling temperature; defaults to the client value
+            language: Per-request language code; None falls back to the client setting
 
         Returns:
             Optional[str]: Transcribed text or None if failed
         """
         url = f"{self.base_url}/audio/transcriptions"
         active_prompt = prompt or self.prompt
+        active_model = model or self._model
+        active_temperature = self._temperature if temperature is None else temperature
+        active_language = self._language if language is None else language
 
         data: dict = {
-            "model": self._model,
-            "temperature": self._temperature,
+            "model": active_model,
+            "temperature": active_temperature,
             "response_format": RESPONSE_FORMAT,
         }
-        if self._language:
-            data["language"] = self._language
+        if active_language:
+            data["language"] = active_language
         if TIMESTAMP_GRANULARITIES:
             data["timestamp_granularities"] = TIMESTAMP_GRANULARITIES
         if active_prompt:
@@ -118,8 +135,13 @@ class WhisperClient:
         logger.debug(
             "Whisper request: url=%s model=%s file=%s prompt=%s temperature=%s "
             "language=%s timestamp_granularities=%s",
-            url, self._model, file_path.name, active_prompt,
-            self._temperature, self._language, TIMESTAMP_GRANULARITIES,
+            url,
+            active_model,
+            file_path.name,
+            active_prompt,
+            active_temperature,
+            active_language,
+            TIMESTAMP_GRANULARITIES,
         )
 
         try:
@@ -145,14 +167,31 @@ class WhisperClient:
             logger.error(f"Error during transcription: {e}")
             return None
 
-    async def transcribe_audio(self, audio_path: Path, prompt: str | None = None) -> str | None:
+    async def transcribe_audio(
+        self,
+        audio_path: Path,
+        prompt: str | None = None,
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        language: str | None = None,
+    ) -> str | None:
         """Transcribe audio file.
 
         Args:
             audio_path: Path to audio file
             prompt: Optional per-request prompt; falls back to system prompt if not set
+            model: Per-request model name; defaults to the client model
+            temperature: Per-request sampling temperature; defaults to the client value
+            language: Per-request language code; None falls back to the client setting
 
         Returns:
             Optional[str]: Transcribed text or None if failed
         """
-        return await self.transcribe(audio_path, prompt=prompt)
+        return await self.transcribe(
+            audio_path,
+            prompt=prompt,
+            model=model,
+            temperature=temperature,
+            language=language,
+        )

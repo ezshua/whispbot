@@ -5,8 +5,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.utils import (
     FALLBACK_TEMP_DIR,
     cleanup_temp_dir,

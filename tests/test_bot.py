@@ -10,6 +10,7 @@ from src.access_control import MAX_PENDING_MESSAGES, AccessManager
 from src.bot import NonAllowedUserFilter, WhispBot, check_whisper_api, resolve_temp_dir
 from src.config import load_config
 from src.handlers import BotHandlers
+from src.user_settings import UserSettings
 from src.utils import FALLBACK_TEMP_DIR
 from src.whisper_client import WhisperClient
 
@@ -86,6 +87,9 @@ async def test_bot_handlers_audio(mock_config):
 
     handlers.whisper_client.transcribe_audio = AsyncMock(return_value="test transcription")
 
+    mock_context = MagicMock()
+    mock_context.user_data = {}
+
     await handlers.handle_audio(mock_update, mock_context)
 
     mock_message.reply_text.assert_called_once_with("Слушаю...")
@@ -111,16 +115,49 @@ class TestStartCommand:
     """Tests for _start_command."""
 
     @pytest.mark.asyncio
-    async def test_sets_minimal_mode_false_and_replies(self, mock_config):
+    async def test_switches_to_two_phase_and_replies(self, mock_config):
         bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
 
         await bot._start_command(mock_update, mock_context)
 
-        assert bot.handlers.minimal_mode is False
+        assert mock_context.user_data["settings"].minimal_mode is False
         mock_update.message.reply_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shows_current_user_settings(self, mock_config):
+        """/start must display the user's current individual settings."""
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
+        mock_update = MagicMock()
+        mock_update.message.reply_text = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.user_data = {
+            "settings": UserSettings(language="en", temperature=0.5, model="whisper-large-v3-turbo")
+        }
+
+        await bot._start_command(mock_update, mock_context)
+
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "whisper-large-v3-turbo" in text
+        assert "en" in text
+        assert "0.5" in text
+
+    @pytest.mark.asyncio
+    async def test_shows_default_model_when_not_overridden(self, mock_config):
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
+        mock_update = MagicMock()
+        mock_update.message.reply_text = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.user_data = {}
+
+        await bot._start_command(mock_update, mock_context)
+
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "whisper-1" in text
+        assert "auto" in text
 
 
 class TestStartMinCommand:
@@ -130,11 +167,14 @@ class TestStartMinCommand:
     async def test_sets_minimal_mode_true(self, mock_config):
         bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
         mock_update = MagicMock()
+        mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
 
         await bot._startmin_command(mock_update, mock_context)
 
-        assert bot.handlers.minimal_mode is True
+        assert mock_context.user_data["settings"].minimal_mode is True
+        mock_update.message.reply_text.assert_awaited_once()
 
 
 class TestHelpCommand:
@@ -165,25 +205,26 @@ class TestLangCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["en"]
 
         await bot._lang_command(mock_update, mock_context)
 
-        assert bot.whisper_client.language == "en"
+        assert mock_context.user_data["settings"].language == "en"
         mock_update.message.reply_text.assert_awaited_once_with("Язык: `en`")
 
     @pytest.mark.asyncio
     async def test_sets_language_to_none_for_auto(self, mock_config):
         bot = WhispBot(mock_config, FALLBACK_TEMP_DIR)
-        bot.whisper_client.set_language("ru")
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {"settings": UserSettings(language="ru")}
         mock_context.args = ["auto"]
 
         await bot._lang_command(mock_update, mock_context)
 
-        assert bot.whisper_client.language is None
+        assert mock_context.user_data["settings"].language is None
         mock_update.message.reply_text.assert_awaited_once_with("Язык: автораспознавание")
 
     @pytest.mark.asyncio
@@ -192,6 +233,7 @@ class TestLangCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = []
 
         await bot._lang_command(mock_update, mock_context)
@@ -209,11 +251,12 @@ class TestTempCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["0.5"]
 
         await bot._temp_command(mock_update, mock_context)
 
-        assert bot.whisper_client.temperature == 0.5
+        assert mock_context.user_data["settings"].temperature == 0.5
         mock_update.message.reply_text.assert_awaited_once_with("Температура: `0.5`")
 
     @pytest.mark.asyncio
@@ -222,11 +265,12 @@ class TestTempCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["0,3"]
 
         await bot._temp_command(mock_update, mock_context)
 
-        assert bot.whisper_client.temperature == 0.3
+        assert mock_context.user_data["settings"].temperature == 0.3
 
     @pytest.mark.asyncio
     async def test_replies_with_usage_when_no_args(self, mock_config):
@@ -234,6 +278,7 @@ class TestTempCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = []
 
         await bot._temp_command(mock_update, mock_context)
@@ -247,6 +292,7 @@ class TestTempCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["abc"]
 
         await bot._temp_command(mock_update, mock_context)
@@ -260,6 +306,7 @@ class TestTempCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["2.5"]
 
         await bot._temp_command(mock_update, mock_context)
@@ -277,11 +324,12 @@ class TestModelCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["large"]
 
         await bot._model_command(mock_update, mock_context)
 
-        assert bot.whisper_client.model == "whisper-large-v3"
+        assert mock_context.user_data["settings"].model == "whisper-large-v3"
         mock_update.message.reply_text.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -290,11 +338,12 @@ class TestModelCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["turbo"]
 
         await bot._model_command(mock_update, mock_context)
 
-        assert bot.whisper_client.model == "whisper-large-v3-turbo"
+        assert mock_context.user_data["settings"].model == "whisper-large-v3-turbo"
         mock_update.message.reply_text.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -303,6 +352,7 @@ class TestModelCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = []
 
         await bot._model_command(mock_update, mock_context)
@@ -316,6 +366,7 @@ class TestModelCommand:
         mock_update = MagicMock()
         mock_update.message.reply_text = AsyncMock()
         mock_context = MagicMock()
+        mock_context.user_data = {}
         mock_context.args = ["invalid"]
 
         await bot._model_command(mock_update, mock_context)
