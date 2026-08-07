@@ -8,6 +8,7 @@ read once at startup.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,35 @@ DEFAULT_ADMIN_ID: int = 962767424
 DEFAULT_ADMIN_NAME: str = "alexx-rc1"
 
 _FILE_HEADER = "# user_id; name or comment"
+
+_ARGUMENT_DELIMITERS = re.compile(r"[\s,;:|]+")
+
+
+def parse_user_args(raw: str) -> tuple[int | None, str]:
+    """Parse a user ID and optional name from command arguments.
+
+    The ID and name may appear in any order and be separated by whitespace,
+    commas, semicolons, colons or pipes. The first numeric token is treated as
+    the user ID (negative values are allowed); all other tokens joined with
+    spaces form the name. If both parameters are numeric, the first is the ID
+    and the second becomes the name.
+
+    Args:
+        raw: Raw command arguments (everything after the command)
+
+    Returns:
+        tuple[Optional[int], str]: User ID (or None if no numeric token found)
+            and the name
+    """
+    tokens = [token for token in _ARGUMENT_DELIMITERS.split(raw) if token]
+    for index, token in enumerate(tokens):
+        try:
+            user_id = int(token)
+        except ValueError:
+            continue
+        name = " ".join(tokens[:index] + tokens[index + 1 :])
+        return user_id, name
+    return None, ""
 
 
 @dataclass(frozen=True)
@@ -32,6 +62,25 @@ class AccessEntry:
 
     user_id: int
     comment: str = ""
+
+
+def _format_user_list(users: dict[int, str]) -> str:
+    """Render a user list as a display string.
+
+    One user per line as ``<name> (<id>)``; users without a name are shown by
+    their ID alone. Lines are ordered by user ID.
+
+    Args:
+        users: User IDs mapped to their comments
+
+    Returns:
+        str: One user per line, or an empty string if the list is empty
+    """
+    lines: list[str] = []
+    for user_id in sorted(users):
+        comment = users[user_id]
+        lines.append(f"{comment} ({user_id})" if comment else str(user_id))
+    return "\n".join(lines)
 
 
 class AccessManager:
@@ -132,6 +181,22 @@ class AccessManager:
         """
         return user_id in self.allowed
 
+    def format_allowed(self) -> str:
+        """Render the allowed users list for display.
+
+        Returns:
+            str: One user per line, or an empty string if the list is empty
+        """
+        return _format_user_list(self.allowed)
+
+    def format_ignored(self) -> str:
+        """Render the ignored users list for display.
+
+        Returns:
+            str: One user per line, or an empty string if the list is empty
+        """
+        return _format_user_list(self.ignored)
+
     def is_ignored(self, user_id: int) -> bool:
         """Check whether the user is in the ignored list.
 
@@ -175,6 +240,52 @@ class AccessManager:
             )
         return count
 
+    def add_allowed(self, user_id: int, comment: str = "") -> bool:
+        """Add a user to the allowed list and remove them from the ignored list.
+
+        The user is appended to the allowed file. If present in the ignored
+        list, the entry is removed from memory and from the ignored file.
+
+        Args:
+            user_id: Telegram user ID
+            comment: Name or comment for the file line
+
+        Returns:
+            bool: True if the user was newly added, False if already allowed
+        """
+        was_allowed = user_id in self.allowed
+        if user_id in self.ignored:
+            del self.ignored[user_id]
+            self._remove_line_from_file(self.ignored_file, user_id)
+        if not was_allowed:
+            self.allowed[user_id] = comment
+            with self.allowed_file.open("a", encoding="utf-8") as file:
+                file.write(f"{user_id}; {comment}\n")
+            logger.info("User %s added to allowed list", user_id)
+        return not was_allowed
+
+    def del_allowed(self, user_id: int) -> bool:
+        """Move a user from the allowed list to the ignored list.
+
+        Removes the user from the allowed list (memory and file) and adds them
+        to the ignored list (memory and file), keeping the original comment.
+        The pending message counter for the user is cleared.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            bool: True if the user was allowed and got moved, False otherwise
+        """
+        comment = self.allowed.pop(user_id, None)
+        if comment is None:
+            return False
+        self._remove_line_from_file(self.allowed_file, user_id)
+        self.pending.pop(user_id, None)
+        self.add_ignored(user_id, comment)
+        logger.info("User %s moved from allowed to ignored list", user_id)
+        return True
+
     def add_ignored(self, user_id: int, comment: str = "") -> None:
         """Add a user to the ignored list and append them to the file.
 
@@ -188,3 +299,27 @@ class AccessManager:
         with self.ignored_file.open("a", encoding="utf-8") as file:
             file.write(f"{user_id}; {comment}\n")
         logger.info("User %s added to ignored list", user_id)
+
+    def _remove_line_from_file(self, path: Path, user_id: int) -> None:
+        """Remove the line matching a user ID from a list file.
+
+        Non-matching lines (including comments and invalid ones) are preserved
+        in their original order.
+
+        Args:
+            path: Path to the list file
+            user_id: Telegram user ID whose line is removed
+        """
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                raw_id, _, _ = stripped.partition(";")
+                try:
+                    if int(raw_id.strip()) == user_id:
+                        continue
+                except ValueError:
+                    pass
+            kept.append(line)
+        path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")

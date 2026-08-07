@@ -7,11 +7,203 @@ from src.access_control import (
     DEFAULT_ADMIN_NAME,
     MAX_PENDING_MESSAGES,
     AccessManager,
+    parse_user_args,
 )
 
 
 def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
+
+
+class TestParseUserArgs:
+    """Tests for parse_user_args."""
+
+    def test_id_only(self):
+        assert parse_user_args("123") == (123, "")
+
+    def test_id_and_name(self):
+        assert parse_user_args("123 Ivan") == (123, "Ivan")
+
+    def test_name_and_id(self):
+        assert parse_user_args("Ivan 123") == (123, "Ivan")
+
+    def test_semicolon_separator(self):
+        assert parse_user_args("123;Ivan") == (123, "Ivan")
+
+    def test_comma_separator(self):
+        assert parse_user_args("Ivan,123") == (123, "Ivan")
+
+    def test_colon_and_pipe_separators(self):
+        assert parse_user_args("123:Petrov|Sidorov") == (123, "Petrov Sidorov")
+
+    def test_negative_id(self):
+        assert parse_user_args("-123 Ivan") == (-123, "Ivan")
+
+    def test_two_numbers_first_is_id(self):
+        assert parse_user_args("123 456") == (123, "456")
+
+    def test_multiple_word_name(self):
+        assert parse_user_args("Ivan Petrov 123") == (123, "Ivan Petrov")
+
+    def test_no_id_returns_none(self):
+        assert parse_user_args("Ivan") == (None, "")
+
+    def test_empty_returns_none(self):
+        assert parse_user_args("") == (None, "")
+
+
+class TestAddAllowed:
+    """Tests for add_allowed."""
+
+    def test_appends_to_allowed_file(self, tmp_path):
+        allowed = tmp_path / "allowed.txt"
+        _write(allowed, "1; Admin\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(allowed, tmp_path / "ignored.txt")
+        added = access.add_allowed(456, "Ivan")
+
+        assert added is True
+        assert access.is_allowed(456)
+        assert "456; Ivan" in allowed.read_text(encoding="utf-8")
+
+    def test_removes_user_from_ignored(self, tmp_path):
+        ignored = tmp_path / "ignored.txt"
+        _write(tmp_path / "allowed.txt", "1; Admin\n")
+        _write(ignored, "456; Spammer\n")
+
+        access = AccessManager(tmp_path / "allowed.txt", ignored)
+        access.add_allowed(456, "Ivan")
+
+        assert access.is_ignored(456) is False
+        content = ignored.read_text(encoding="utf-8")
+        assert "456" not in content
+
+    def test_preserves_other_ignored_entries(self, tmp_path):
+        ignored = tmp_path / "ignored.txt"
+        _write(tmp_path / "allowed.txt", "1; Admin\n")
+        _write(ignored, "# comment\n456; Spammer\n789; Bot\n")
+
+        access = AccessManager(tmp_path / "allowed.txt", ignored)
+        access.add_allowed(456, "Ivan")
+
+        content = ignored.read_text(encoding="utf-8")
+        assert "456" not in content
+        assert "789; Bot" in content
+        assert "# comment" in content
+
+    def test_returns_false_when_already_allowed(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+        added = access.add_allowed(1, "New Name")
+
+        assert added is False
+        assert access.allowed[1] == "Admin"
+
+    def test_accepts_negative_id(self, tmp_path):
+        allowed = tmp_path / "allowed.txt"
+        _write(allowed, "1; Admin\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(allowed, tmp_path / "ignored.txt")
+        added = access.add_allowed(-5, "Test")
+
+        assert added is True
+        assert "-5; Test" in allowed.read_text(encoding="utf-8")
+
+
+class TestDelAllowed:
+    """Tests for del_allowed."""
+
+    def test_moves_user_to_ignored_keeping_comment(self, tmp_path):
+        allowed = tmp_path / "allowed.txt"
+        ignored = tmp_path / "ignored.txt"
+        _write(allowed, "1; Admin\n456; Ivan\n")
+        _write(ignored, "")
+
+        access = AccessManager(allowed, ignored)
+        moved = access.del_allowed(456)
+
+        assert moved is True
+        assert access.is_allowed(456) is False
+        assert access.is_ignored(456)
+        assert access.ignored[456] == "Ivan"
+        assert "456" not in allowed.read_text(encoding="utf-8")
+        assert "456; Ivan" in ignored.read_text(encoding="utf-8")
+
+    def test_preserves_other_allowed_entries(self, tmp_path):
+        allowed = tmp_path / "allowed.txt"
+        _write(allowed, "1; Admin\n456; Ivan\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(allowed, tmp_path / "ignored.txt")
+        access.del_allowed(456)
+
+        content = allowed.read_text(encoding="utf-8")
+        assert "1; Admin" in content
+        assert "456" not in content
+
+    def test_returns_false_when_not_allowed(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+        moved = access.del_allowed(999)
+
+        assert moved is False
+        assert access.is_ignored(999) is False
+
+    def test_clears_pending_counter(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n456; Ivan\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+        access.record_pending(456, "Ivan")
+        assert access.pending_count(456) == 1
+
+        access.del_allowed(456)
+
+        assert access.pending_count(456) == 0
+
+
+class TestFormatLists:
+    """Tests for format_allowed / format_ignored."""
+
+    def test_formats_allowed_with_names_and_ids(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n456; Ivan\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+
+        assert access.format_allowed() == "Admin (1)\nIvan (456)"
+        assert access.format_ignored() == ""
+
+    def test_formats_ignored_without_names(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n")
+        _write(tmp_path / "ignored.txt", "789\n")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+
+        assert access.format_ignored() == "789"
+
+    def test_lists_ordered_by_user_id(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "1; Admin\n100; Zed\n50; Mid\n")
+        _write(tmp_path / "ignored.txt", "")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+
+        assert access.format_allowed() == "Admin (1)\nMid (50)\nZed (100)"
+
+    def test_empty_lists_return_empty_string(self, tmp_path):
+        _write(tmp_path / "allowed.txt", "# header\n")
+        _write(tmp_path / "ignored.txt", "# header\n")
+
+        access = AccessManager(tmp_path / "allowed.txt", tmp_path / "ignored.txt")
+
+        assert access.format_allowed() == ""
+        assert access.format_ignored() == ""
 
 
 class TestLoadLists:

@@ -11,7 +11,7 @@ from telegram.ext import (
     filters,
 )
 
-from .access_control import MAX_PENDING_MESSAGES, AccessManager
+from .access_control import MAX_PENDING_MESSAGES, AccessManager, parse_user_args
 from .config import load_config
 from .handlers import BotHandlers
 from .utils import cleanup_temp_dir, ensure_temp_dir
@@ -72,6 +72,9 @@ class WhispBot:
         application = Application.builder().token(self.config.telegram_bot_token).build()
 
         if self.access is not None:
+            application.add_handler(CommandHandler("adduser", self._adduser_command))
+            application.add_handler(CommandHandler("deluser", self._deluser_command))
+            application.add_handler(CommandHandler("listuser", self._listuser_command))
             application.add_handler(
                 MessageHandler(NonAllowedUserFilter(self.access), self._gatekeeper)
             )
@@ -128,12 +131,14 @@ class WhispBot:
             return
 
         if self.access.admin_id is None:
-            await message.reply_text("К сожалению, запрос не может быть отправлен администратору бота.")
+            await message.reply_text(
+                "К сожалению, запрос не может быть отправлен администратору бота."
+            )
             return
 
         await context.bot.send_message(
             chat_id=self.access.admin_id,
-            text=f"👤 Пользователь {user.full_name} (id {user.id}) хочет подключиться к боту:",
+            text=f"👤 Пользователь {user.full_name} ({user.id}) хочет подключиться к боту:",
         )
         await message.forward(chat_id=self.access.admin_id)
         count = self.access.record_pending(user.id, user.full_name or "unknown")
@@ -145,7 +150,7 @@ class WhispBot:
             )
             await context.bot.send_message(
                 chat_id=self.access.admin_id,
-                text=f"Пользователь {user.full_name} (id {user.id}) добавлен в список игнорируемых.",
+                text=f"Пользователь {user.full_name} ({user.id}) добавлен в список игнорируемых.",
             )
         else:
             await message.reply_text(
@@ -153,6 +158,93 @@ class WhispBot:
                 f"Осталось сообщений администратору: {MAX_PENDING_MESSAGES - count}."
             )
         logger.info("Pending request forwarded from user %s", user.id)
+
+    async def _adduser_command(self, update: Update, context) -> None:
+        """Handle /adduser command — admin only.
+
+        Adds a user to the allowed list and removes them from the ignored
+        list. Invocations from non-admin users are silently ignored.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        user = update.effective_user
+        if user is None or self.access is None or user.id != self.access.admin_id:
+            return
+
+        user_id, name = parse_user_args(" ".join(context.args))
+        if user_id is None:
+            await update.message.reply_text("Использование: `/adduser <идентификатор> [имя]`")
+            return
+
+        was_ignored = self.access.is_ignored(user_id)
+        added = self.access.add_allowed(user_id, name)
+
+        display = f"{name} ({user_id})" if name else f"{user_id}"
+        if added:
+            text = f"✅ Пользователь {display} добавлен в список разрешённых."
+        else:
+            text = f"ℹ️ Пользователь {display} уже в списке разрешённых."
+        if was_ignored:
+            text += " Удалён из списка игнорируемых."
+        await update.message.reply_text(text)
+        logger.info("adduser: user %s added by admin %s", user_id, user.id)
+
+    async def _deluser_command(self, update: Update, context) -> None:
+        """Handle /deluser command — admin only.
+
+        Moves a user from the allowed list to the ignored list. Invocations
+        from non-admin users are silently ignored.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        user = update.effective_user
+        if user is None or self.access is None or user.id != self.access.admin_id:
+            return
+
+        user_id, _ = parse_user_args(" ".join(context.args))
+        if user_id is None:
+            await update.message.reply_text("Использование: `/deluser <идентификатор>`")
+            return
+
+        if user_id == self.access.admin_id:
+            await update.message.reply_text("Ошибка: нельзя удалить администратора.")
+            return
+
+        if self.access.del_allowed(user_id):
+            await update.message.reply_text(
+                f"✅ Пользователь {user_id} перемещён в список игнорируемых."
+            )
+        else:
+            await update.message.reply_text(
+                f"Ошибка: пользователь {user_id} не в списке разрешённых."
+            )
+        logger.info("deluser: user %s moved by admin %s", user_id, user.id)
+
+    async def _listuser_command(self, update: Update, context) -> None:
+        """Handle /listuser command — admin only.
+
+        Sends two separate messages to the admin: first the allowed users
+        list, then the ignored users list. Invocations from non-admin users
+        are silently ignored.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        user = update.effective_user
+        if user is None or self.access is None or user.id != self.access.admin_id:
+            return
+
+        allowed_text = self.access.format_allowed() or "Список пуст"
+        await update.message.reply_text(f"📋 Разрешённые пользователи:\n{allowed_text}")
+
+        ignored_text = self.access.format_ignored() or "Список пуст"
+        await update.message.reply_text(f"⛔ Игнорируемые пользователи:\n{ignored_text}")
+        logger.info("listuser: lists sent to admin %s", user.id)
 
     async def _start_command(self, update, context) -> None:
         """Handle /start command — normal mode (two-phase)."""
@@ -192,6 +284,12 @@ class WhispBot:
             "\n`/temp <0.0–1.0>` — установить температуру модели"
             "\n`/model large` — переключиться на whisper-large-v3"
             "\n`/model turbo` — переключиться на whisper-large-v3-turbo"
+            "\n`/adduser <id> [имя]` — добавить пользователя в список разрешённых "
+            "(только для администратора)"
+            "\n`/deluser <id>` — переместить пользователя в список игнорируемых "
+            "(только для администратора)"
+            "\n`/listuser` — показать списки разрешённых и игнорируемых "
+            "(только для администратора)"
         )
 
     async def _lang_command(self, update, context) -> None:

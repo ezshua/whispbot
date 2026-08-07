@@ -559,3 +559,243 @@ class TestGatekeeper:
 
         update.message.reply_text.assert_not_called()
         update.message.forward.assert_not_called()
+
+
+# ── /adduser command ────────────────────────────────────────────
+
+
+class TestAddUserCommand:
+    """Tests for the admin-only /adduser command."""
+
+    @pytest.mark.asyncio
+    async def test_silently_ignored_for_allowed_non_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="1; Admin\n2; Regular\n")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(2, text=None, voice=None)
+        context.args = ["456", "Ivan"]
+
+        await bot._adduser_command(update, context)
+
+        update.message.reply_text.assert_not_called()
+        assert access.is_allowed(456) is False
+
+    @pytest.mark.asyncio
+    async def test_silently_ignored_for_unknown_user(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(999, text=None, voice=None)
+        context.args = ["456"]
+
+        await bot._adduser_command(update, context)
+
+        update.message.reply_text.assert_not_called()
+        assert access.is_allowed(456) is False
+
+    @pytest.mark.asyncio
+    async def test_admin_adds_user_with_name(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["456", "Ivan"]
+
+        await bot._adduser_command(update, context)
+
+        assert access.is_allowed(456)
+        assert access.allowed[456] == "Ivan"
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "456" in text and "Ivan" in text
+        assert "добавлен" in text
+
+    @pytest.mark.asyncio
+    async def test_admin_adds_user_and_removes_from_ignored(self, tmp_path, mock_config):
+        allowed = tmp_path / "allowed.txt"
+        allowed.write_text("1; Admin\n", encoding="utf-8")
+        ignored = tmp_path / "ignored.txt"
+        ignored.write_text("456; Spammer\n", encoding="utf-8")
+        access = AccessManager(allowed, ignored)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["456", "Ivan"]
+
+        await bot._adduser_command(update, context)
+
+        assert access.is_ignored(456) is False
+        assert "456" not in ignored.read_text(encoding="utf-8")
+        text = update.message.reply_text.call_args[0][0]
+        assert "игнорируемых" in text
+
+    @pytest.mark.asyncio
+    async def test_admin_accepts_name_and_id_in_any_order(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["Ivan;456"]
+
+        await bot._adduser_command(update, context)
+
+        assert access.allowed[456] == "Ivan"
+
+    @pytest.mark.asyncio
+    async def test_two_numbers_first_is_id(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["123", "456"]
+
+        await bot._adduser_command(update, context)
+
+        assert access.allowed[123] == "456"
+
+    @pytest.mark.asyncio
+    async def test_accepts_negative_id(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["-5", "Bob"]
+
+        await bot._adduser_command(update, context)
+
+        assert access.allowed[-5] == "Bob"
+
+    @pytest.mark.asyncio
+    async def test_replies_usage_when_no_id(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = []
+
+        await bot._adduser_command(update, context)
+
+        update.message.reply_text.assert_awaited_once()
+        assert "Использование" in update.message.reply_text.call_args[0][0]
+
+
+class TestDelUserCommand:
+    """Tests for the admin-only /deluser command."""
+
+    @pytest.mark.asyncio
+    async def test_silently_ignored_for_non_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="1; Admin\n2; Regular\n")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(2, text=None, voice=None)
+        context.args = ["1"]
+
+        await bot._deluser_command(update, context)
+
+        update.message.reply_text.assert_not_called()
+        assert access.is_allowed(1)
+
+    @pytest.mark.asyncio
+    async def test_admin_moves_user_to_ignored(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="1; Admin\n456; Ivan\n")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["456"]
+
+        await bot._deluser_command(update, context)
+
+        assert access.is_allowed(456) is False
+        assert access.is_ignored(456)
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "456" in text and "игнорируемых" in text
+
+    @pytest.mark.asyncio
+    async def test_moved_user_is_removed_from_allowed_file(self, tmp_path, mock_config):
+        allowed = tmp_path / "allowed.txt"
+        allowed.write_text("1; Admin\n456; Ivan\n", encoding="utf-8")
+        ignored = tmp_path / "ignored.txt"
+        ignored.write_text("", encoding="utf-8")
+        access = AccessManager(allowed, ignored)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["456"]
+
+        await bot._deluser_command(update, context)
+
+        assert "456" not in allowed.read_text(encoding="utf-8")
+        assert "456; Ivan" in ignored.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_replies_error_when_not_in_allowed(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["999"]
+
+        await bot._deluser_command(update, context)
+
+        update.message.reply_text.assert_awaited_once()
+        assert "не в списке" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_delete_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = ["1"]
+
+        await bot._deluser_command(update, context)
+
+        assert access.is_allowed(1)
+        update.message.reply_text.assert_awaited_once()
+        assert "нельзя удалить" in update.message.reply_text.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_replies_usage_when_no_id(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+        context.args = []
+
+        await bot._deluser_command(update, context)
+
+        update.message.reply_text.assert_awaited_once()
+        assert "Использование" in update.message.reply_text.call_args[0][0]
+
+
+class TestListUserCommand:
+    """Tests for the admin-only /listuser command."""
+
+    @pytest.mark.asyncio
+    async def test_silently_ignored_for_non_admin(self, tmp_path, mock_config):
+        access = _make_access(tmp_path, allowed="1; Admin\n2; Regular\n")
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(2, text=None, voice=None)
+
+        await bot._listuser_command(update, context)
+
+        update.message.reply_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sends_two_messages_with_lists(self, tmp_path, mock_config):
+        allowed = tmp_path / "allowed.txt"
+        allowed.write_text("1; Admin\n", encoding="utf-8")
+        ignored = tmp_path / "ignored.txt"
+        ignored.write_text("789; Spammer\n", encoding="utf-8")
+        access = AccessManager(allowed, ignored)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+
+        await bot._listuser_command(update, context)
+
+        replies = [call.args[0] for call in update.message.reply_text.call_args_list]
+        assert len(replies) == 2
+        assert "Разрешённые" in replies[0]
+        assert "Admin (1)" in replies[0]
+        assert "Игнорируемые" in replies[1]
+        assert "Spammer (789)" in replies[1]
+
+    @pytest.mark.asyncio
+    async def test_shows_empty_placeholder_for_empty_ignored(self, tmp_path, mock_config):
+        access = _make_access(tmp_path)
+        bot = WhispBot(mock_config, FALLBACK_TEMP_DIR, access)
+        update, context = _make_update(1, text=None, voice=None)
+
+        await bot._listuser_command(update, context)
+
+        replies = [call.args[0] for call in update.message.reply_text.call_args_list]
+        assert len(replies) == 2
+        assert "Admin (1)" in replies[0]
+        assert "Список пуст" in replies[1]
