@@ -14,6 +14,7 @@ from telegram.ext import (
 from .access_control import MAX_PENDING_MESSAGES, AccessManager, parse_user_args
 from .config import load_config
 from .handlers import BotHandlers
+from .stats import DEFAULT_PID_FILE, DEFAULT_STATS_FILE, Stats, clear_pid_file, write_pid_file
 from .user_settings import get_user_settings
 from .utils import cleanup_temp_dir, ensure_temp_dir
 from .whisper_client import MODEL_ALIASES, WhisperClient
@@ -55,16 +56,24 @@ class NonAllowedUserFilter(filters.UpdateFilter):
 class WhispBot:
     """Main Telegram bot class."""
 
-    def __init__(self, config, temp_dir: Path, access: AccessManager | None = None):
+    def __init__(
+        self,
+        config,
+        temp_dir: Path,
+        access: AccessManager | None = None,
+        stats: Stats | None = None,
+    ):
         """Initialize the bot.
 
         Args:
             config: Application configuration
             temp_dir: Temporary files directory
             access: Optional user access manager (enables the gatekeeper)
+            stats: Optional runtime statistics collector (enables message counting)
         """
         self.config = config
         self.access = access
+        self.stats = stats
         self.whisper_client = WhisperClient(self.config.whisper)
         self.handlers = BotHandlers(self.config, self.whisper_client, temp_dir)
 
@@ -90,15 +99,32 @@ class WhispBot:
         application.add_handler(MessageHandler(filters.VOICE, self.handlers.handle_voice))
         application.add_handler(MessageHandler(filters.VIDEO_NOTE, self.handlers.handle_video_note))
         application.add_handler(MessageHandler(filters.Document.ALL, self.handlers.handle_document))
+        if self.stats is not None:
+            application.add_handler(MessageHandler(filters.ALL, self._stats_collector), group=1)
         application.add_error_handler(self._error_handler)
         application.post_shutdown = self._on_shutdown
 
         logger.info("WhispBot started — awaiting messages")
         application.run_polling(allowed_updates=["message"])
 
+    async def _stats_collector(self, update: Update, context) -> None:
+        """Record every incoming message for the status report.
+
+        Registered in a separate handler group, so it runs after the main
+        handler(s) regardless of which one processed the update.
+
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+        """
+        user = update.effective_user
+        if user is not None:
+            self.stats.record_message(user.id)
+
     async def _on_shutdown(self, application) -> None:
         """Clean up resources on shutdown."""
         await self.whisper_client.close()
+        clear_pid_file(DEFAULT_PID_FILE)
 
     async def _error_handler(self, update, context) -> None:
         """Log unhandled exceptions from handlers."""
@@ -448,11 +474,16 @@ def main() -> None:
     temp_dir = resolve_temp_dir(config)
     check_whisper_api(config)
 
+    stats = Stats(DEFAULT_STATS_FILE)
+    stats.reset()
+    pid = write_pid_file(DEFAULT_PID_FILE)
+    logger.info("Runtime state: pid=%s stats=%s", pid, DEFAULT_STATS_FILE)
+
     access = AccessManager(
         Path(config.access_allowed_users_file),
         Path(config.access_ignored_users_file),
     )
-    bot = WhispBot(config, temp_dir, access)
+    bot = WhispBot(config, temp_dir, access, stats=stats)
     bot.run()
 
 
