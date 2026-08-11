@@ -23,6 +23,7 @@ run/
 .idea/
 *.swp
 *.swo
+.qwen/
 
 # OS
 Thumbs.db
