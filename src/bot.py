@@ -138,9 +138,7 @@ class WhispBot:
             await application.bot.send_message(
                 chat_id=self.access.admin_id,
                 text=(
-                    "🎙️ *WhispBot запущен и готов к работе!*\n\n"
-                    "Бот успешно стартовал и слушает входящие сообщения. "
-                    "Отправьте аудио или видео — и получите расшифровку."
+                    "🎙️ *Бот успешно запущен и готов к работе на сервере.*"
                 ),
                 parse_mode="Markdown",
             )
