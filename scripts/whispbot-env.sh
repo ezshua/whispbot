@@ -55,6 +55,35 @@ test_bot_running() {
     get_bot_process >/dev/null 2>&1
 }
 
+# ── Stats helpers ──────────────────────────────────────────────────────
+
+# Read run/stats.json and echo three space-separated fields:
+#   started_at users_count messages_processed
+# Uses jq when available, otherwise falls back to the venv python (or any
+# python3) — reading JSON does not require the project dependencies.
+# Returns non-zero when the file is missing or unparseable.
+read_stats_fields() {
+    if [[ ! -f "${statsfile}" ]]; then
+        return 1
+    fi
+    if command -v jq &> /dev/null; then
+        jq -r '[.started_at // 0, .users_count // 0, .messages_processed // 0] | join(" ")' "${statsfile}" 2>/dev/null || return 1
+    else
+        local py="${python_exe}"
+        if [[ ! -x "${py}" ]]; then
+            py="python3"
+        fi
+        "${py}" -c "
+import json
+try:
+    d = json.load(open('${statsfile}'))
+    print(d.get('started_at', 0), d.get('users_count', 0), d.get('messages_processed', 0))
+except Exception:
+    raise SystemExit(1)
+" 2>/dev/null || return 1
+    fi
+}
+
 # Starts the bot in the background and records its PID in run/bot.pid.
 # Redirects stdout/stderr to logs.
 start_bot() {
@@ -88,6 +117,9 @@ start_bot() {
 }
 
 # Stops the running bot (if any) and removes run/bot.pid.
+# The PID file is removed only when it still records the process we just
+# stopped, so a race between stop and a fresh start does not wipe the new
+# instance's PID.
 stop_bot() {
     local pid
     pid=$(get_bot_process)
@@ -104,8 +136,19 @@ stop_bot() {
             kill -9 "${pid}" 2>/dev/null || true
         fi
         echo "[Bot] Stopped (PID ${pid})."
+        # Remove PID file only if it still points at the process we stopped.
+        local recorded
+        recorded=$(get_recorded_bot_pid)
+        if [[ "${recorded}" == "${pid}" ]]; then
+            rm -f "${pidfile}"
+            echo "[Bot] Removed PID file."
+        fi
     else
         echo "[Bot] Not running."
+        # No live process — clean up a stale PID file if present.
+        if [[ -f "${pidfile}" ]]; then
+            rm -f "${pidfile}"
+            echo "[Bot] Removed stale PID file."
+        fi
     fi
-    rm -f "${pidfile}"
 }

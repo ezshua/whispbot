@@ -102,6 +102,7 @@ class WhispBot:
         if self.stats is not None:
             application.add_handler(MessageHandler(filters.ALL, self._stats_collector), group=1)
         application.add_error_handler(self._error_handler)
+        application.post_init = self._on_post_init
         application.post_shutdown = self._on_shutdown
 
         logger.info("WhispBot started — awaiting messages")
@@ -120,6 +121,32 @@ class WhispBot:
         user = update.effective_user
         if user is not None:
             self.stats.record_message(user.id)
+
+    async def _on_post_init(self, application) -> None:
+        """Notify the admin that the bot is ready and awaiting messages.
+
+        Sent once the Telegram Application is fully initialised and polling
+        has started, so the admin can be sure the bot is reachable.
+
+        Args:
+            application: The Telegram Application instance
+        """
+        if self.access is None or self.access.admin_id is None:
+            logger.warning("Admin ID is not set — startup notification skipped")
+            return
+        try:
+            await application.bot.send_message(
+                chat_id=self.access.admin_id,
+                text=(
+                    "🎙️ *WhispBot запущен и готов к работе!*\n\n"
+                    "Бот успешно стартовал и слушает входящие сообщения. "
+                    "Отправьте аудио или видео — и получите расшифровку."
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info("Startup notification sent to admin %s", self.access.admin_id)
+        except Exception as exc:
+            logger.warning("Failed to send startup notification to admin: %s", exc)
 
     async def _on_shutdown(self, application) -> None:
         """Clean up resources on shutdown."""

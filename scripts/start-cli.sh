@@ -17,11 +17,11 @@ if [[ ! -x "${python_exe}" ]]; then
     exit 1
 fi
 
+# Ensure no bot is running before starting
 if test_bot_running; then
     existing=$(get_bot_process)
-    echo "[Bot] ERROR: the bot is already running (PID ${existing})." >&2
-    echo "[Bot] Use ./status-bot.sh to check, ./restart-bot.sh or ./stop-bot.sh to manage it." >&2
-    exit 1
+    echo "[Bot] Found running bot (PID ${existing}). Stopping it..."
+    stop_bot
 fi
 
 mkdir -p "${rundir}"
